@@ -5,222 +5,249 @@
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <fcntl.h>
-#include <libgen.h> // For dirname()
+#include <libgen.h>
 #include <errno.h>
-#include <sys/stat.h> // For checking if files exist
-#include <ctype.h>    // For trimming whitespaces
+#include <sys/stat.h>
+#include <ctype.h>
 #include <sys/select.h>
 
 #define MAX_USERS 50
 #define MAX_TEXT_SIZE 256
 
 typedef struct {
-    long mtype;
-    int timestamp;
-    int user;
-    char mtext[MAX_TEXT_SIZE];
-    int modifyingGroup;
+	long mtype;
+	int timestamp;
+	int user;
+	char mtext[MAX_TEXT_SIZE];
+	int modifyingGroup;
 } Message;
 
-// Function to trim leading and trailing whitespaces
 char *trimWhitespace(char *str) {
-    char *end;
-    while (isspace((unsigned char)*str)) str++;
-    if (*str == 0) return str;
-    end = str + strlen(str) - 1;
-    while (end > str && isspace((unsigned char)*end)) end--;
-    *(end + 1) = 0;
-    return str;
+	char *end;
+	while(isspace((unsigned char)*str)) str++;
+	if(*str == 0) return str;
+	end = str + strlen(str) - 1;
+	while(end > str && isspace((unsigned char)*end)) end--;
+	*(end+1) = 0;
+	return str;
 }
 
 void handleUserProcess(int pipeFd[2], const char *userFilePath) {
-    close(pipeFd[0]); // Close read end of pipe
-    FILE *userFile = fopen(userFilePath, "r");
+	close(pipeFd[0]);
+	FILE *userFile = fopen(userFilePath, "r");
     
-    if (!userFile) {
-        perror("Failed to open user file");
-        exit(EXIT_FAILURE);
-    }
+	if (!userFile) {
+    	perror("Failed to open user file");
+    	exit(EXIT_FAILURE);
+	}
 
-    char buffer[MAX_TEXT_SIZE];
-    int timestamp;
-    char message[MAX_TEXT_SIZE];
+	char buffer[MAX_TEXT_SIZE];
+	int timestamp;
+	char message[MAX_TEXT_SIZE];
     
-    while (fscanf(userFile, "%d %[^\n]", &timestamp, message) == 2) {
-        snprintf(buffer, sizeof(buffer), "%d %s", timestamp, message);
-        write(pipeFd[1], buffer, MAX_TEXT_SIZE); // Write padded message to pipe
-        usleep(10000); // Simulate delay
-    }
+	while (fscanf(userFile, "%d %[^\n]", &timestamp, message) == 2) {
+    	snprintf(buffer, sizeof(buffer), "%d %s", timestamp, message);
+    	write(pipeFd[1], buffer, strlen(buffer) + 1);
+    	usleep(1000); // Small delay to prevent overwhelming the pipe
+	}
     
-    fclose(userFile);
-    close(pipeFd[1]); // Close write end of pipe
+	fclose(userFile);
+	close(pipeFd[1]);
+	exit(0);
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 5) {
-        fprintf(stderr, "Usage: %s <group_file> <validation_key> <app_key> <moderator_key>\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
+	if (argc != 5) {
+    	fprintf(stderr, "Usage: %s <group_file> <validation_key> <app_key> <moderator_key>\n", argv[0]);
+    	exit(EXIT_FAILURE);
+	}
 
-    const char *groupFilePath = argv[1];
-    int validationKey = atoi(argv[2]);
-    int appKey = atoi(argv[3]);
-    int moderatorKey = atoi(argv[4]);
+	const char *groupFilePath = argv[1];
+	int validationKey = atoi(argv[2]);
+	int appKey = atoi(argv[3]);
+	int moderatorKey = atoi(argv[4]);
 
-    // Open group file
-    FILE *groupFile = fopen(groupFilePath, "r");
-    if (!groupFile) {
-        perror("Failed to open group file");
-        exit(EXIT_FAILURE);
-    }
+	FILE *groupFile = fopen(groupFilePath, "r");
+	if (!groupFile) {
+    	perror("Failed to open group file");
+    	exit(EXIT_FAILURE);
+	}
 
-    // Read number of users and their file paths
-    int numUsers;
-    if (fscanf(groupFile, "%d", &numUsers) != 1) {
-        perror("Failed to read number of users from group file");
-        fclose(groupFile);
-        exit(EXIT_FAILURE);
-    }
+	int numUsers;
+	if (fscanf(groupFile, "%d", &numUsers) != 1) {
+    	perror("Failed to read number of users from group file");
+    	fclose(groupFile);
+    	exit(EXIT_FAILURE);
+	}
 
-    char userFiles[MAX_USERS][MAX_TEXT_SIZE];
-    for (int i = 0; i < numUsers; i++) {
-        if (fscanf(groupFile, "%s", userFiles[i]) != 1) {
-            perror("Failed to read user file path from group file");
-            fclose(groupFile);
-            exit(EXIT_FAILURE);
-        }
+	char userFiles[MAX_USERS][MAX_TEXT_SIZE];
+	for (int i = 0; i < numUsers; i++) {
+    	if (fscanf(groupFile, "%s", userFiles[i]) != 1) {
+        	perror("Failed to read user file path from group file");
+        	fclose(groupFile);
+        	exit(EXIT_FAILURE);
+    	}
 
-        // Trim whitespaces from the user file path
-        trimWhitespace(userFiles[i]);
+    	trimWhitespace(userFiles[i]);
 
-        // Prepend test case directory path and users/ directory to user file paths
-        char fullUserPath[MAX_TEXT_SIZE];
-        snprintf(fullUserPath, sizeof(fullUserPath), "%s/../users/%s", dirname(strdup(groupFilePath)), userFiles[i]);
-        strcpy(userFiles[i], fullUserPath);
+    	char fullUserPath[MAX_TEXT_SIZE];
+    	char *testCaseDir = dirname(dirname(strdup(groupFilePath)));
+    	snprintf(fullUserPath, sizeof(fullUserPath), "%s/%s", testCaseDir, userFiles[i]);
+    	strcpy(userFiles[i], fullUserPath);
+	}
+	fclose(groupFile);
 
-        // Debugging: Print resolved path for verification
-        printf("Resolved user file path: %s\n", fullUserPath);
+	int validationQueue = msgget(validationKey, IPC_CREAT | 0666);
+	int appQueue = msgget(appKey, IPC_CREAT | 0666);
+	int moderatorQueue = msgget(moderatorKey, IPC_CREAT | 0666);
 
-        // Check if the resolved path exists
-        struct stat buffer;
-        if (stat(fullUserPath, &buffer) != 0) {
-            fprintf(stderr, "Error: User file does not exist: %s (errno: %d)\n", fullUserPath, errno);
-            perror("Stat error");
-            fclose(groupFile);
-            exit(EXIT_FAILURE);
-        }
-    }
-    fclose(groupFile);
+	if (validationQueue == -1 || appQueue == -1 || moderatorQueue == -1) {
+    	perror("Failed to create message queues");
+    	exit(EXIT_FAILURE);
+	}
 
-    // Create message queues
-    int validationQueue = msgget(validationKey, IPC_CREAT | 0666);
-    int appQueue = msgget(appKey, IPC_CREAT | 0666);
-    int moderatorQueue = msgget(moderatorKey, IPC_CREAT | 0666);
+	int groupNum = atoi(basename(strdup(groupFilePath)) + 6);
+    	Message initMsg = {
+    	.mtype = 30 + groupNum,  // Distinct message type for each group
+    	.modifyingGroup = groupNum,
+    	.user = 0
+	};
 
-    if (validationQueue == -1 || appQueue == -1 || moderatorQueue == -1) {
-        perror("Failed to create message queues");
-        exit(EXIT_FAILURE);
-    }
+    	if (msgsnd(validationQueue, &initMsg, sizeof(Message) - sizeof(long), 0) == -1) {
+        	if (errno == EIDRM) {
+            	printf("msgsnd failed: Identifier removed\n");
+            	exit(EXIT_FAILURE);
+        	}
+        	perror("Failed to send init message");
+        	exit(EXIT_FAILURE);
+    	}
 
-    // Notify validation process about group creation
-    Message msg;
-    msg.mtype = 1; // Group creation message type
-    msg.modifyingGroup = atoi(strrchr(groupFilePath, '_') + 1); // Extract group number from file name
-    if (strrchr(groupFilePath, '_') == NULL) {
-        fprintf(stderr, "Invalid group file path format: %s\n", groupFilePath);
-        exit(EXIT_FAILURE);
-    }
-    msgsnd(validationQueue, &msg, sizeof(msg) - sizeof(msg.mtype), 0);
+	int pipes[MAX_USERS][2];
+	pid_t userPids[MAX_USERS];
+	int activeUsers = numUsers;
+	int bannedUsers = 0;
+	int isActive[MAX_USERS] = {0};
 
-    // Create pipes and fork user processes
-    int pipes[MAX_USERS][2];
-    pid_t userPids[MAX_USERS];
+	for (int i = 0; i < numUsers; i++) {
+    	if (pipe(pipes[i]) == -1) {
+        	perror("Pipe creation failed");
+        	exit(EXIT_FAILURE);
+    	}
+  	 
+    	pid_t pid = fork();
+    	if (pid == 0) {
+        	handleUserProcess(pipes[i], userFiles[i]);
+        	exit(0);
+    	} else if (pid > 0) {
+        	userPids[i] = pid;
+        	close(pipes[i][1]); // Close write end in parent
+        	isActive[i] = 1;
 
-    for (int i = 0; i < numUsers; i++) {
-        if (pipe(pipes[i]) == -1) {
-            perror("Failed to create pipe");
-            exit(EXIT_FAILURE);
-        }
+      	 
+        	Message userMsg = {
+            	.mtype = 30 + groupNum,  // Distinct message type for each group
+            	.modifyingGroup = groupNum,
+            	.user = i,
+            	.timestamp = 0
+        	};
+        	if (msgsnd(validationQueue, &userMsg, sizeof(Message) - sizeof(long), 0) == -1) {
+            	if (errno == EIDRM) {
+                	printf("msgsnd failed: Identifier removed\n");
+                	exit(EXIT_FAILURE);
+            	}
+        	}
+    	} else {
+        	perror("Fork failed");
+        	exit(EXIT_FAILURE);
+    	}
+	}
 
-        pid_t pid = fork();
-        if (pid == 0) { // Child process (user)
-            handleUserProcess(pipes[i], userFiles[i]);
-            exit(0);
-        } else if (pid > 0) { // Parent process (group)
-            userPids[i] = pid;
-            close(pipes[i][1]); // Close write end in parent
-        } else {
-            perror("Failed to fork user process");
-            exit(EXIT_FAILURE);
-        }
-        
-        // Notify validation process about new user creation
-        msg.mtype = 2; // User creation message type
-        msg.user = i;
-        msgsnd(validationQueue, &msg, sizeof(msg) - sizeof(msg.mtype), 0);
-    }
+	char buffer[MAX_TEXT_SIZE];
+	int timestamp, userId;
+	char text[MAX_TEXT_SIZE];
+	fd_set readfds;
 
-    // Process messages from users and send them to moderator/validation processes
-    char buffer[MAX_TEXT_SIZE];
-    int activeUsers = numUsers;
-    fd_set readfds;
-    
-    while (activeUsers > 1) {
-        FD_ZERO(&readfds);
-        int maxfd = -1;
-        for (int i = 0; i < numUsers; i++) {
-            FD_SET(pipes[i][0], &readfds);
-            if (pipes[i][0] > maxfd) maxfd = pipes[i][0];
-        }
+   while (activeUsers > 0) {
+    	FD_ZERO(&readfds);
+    	int maxfd = -1;
+    	for (int i = 0; i < numUsers; i++) {
+        	if (isActive[i]) {
+            	FD_SET(pipes[i][0], &readfds);
+            	if (pipes[i][0] > maxfd) maxfd = pipes[i][0];
+        	}
+    	}
 
-        if (select(maxfd + 1, &readfds, NULL, NULL, NULL) > 0) {
-            for (int i = 0; i < numUsers; i++) {
-                if (FD_ISSET(pipes[i][0], &readfds)) {
-                    ssize_t bytesRead = read(pipes[i][0], buffer, MAX_TEXT_SIZE);
-                    if (bytesRead > 0) {
-                        // Process and forward message
-                        Message msg;
-                        sscanf(buffer, "%d %[^\n]", &msg.timestamp, msg.mtext);
-                        msg.mtype = 1; // Message type for moderator
-                        msg.user = i;
-                        msg.modifyingGroup = atoi(strrchr(groupFilePath, '_') + 1);
+    	struct timeval timeout = {0, 10000};  // 10ms timeout
+    	int ready = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
 
-                        // Send to moderator
-                        msgsnd(moderatorQueue, &msg, sizeof(msg) - sizeof(msg.mtype), 0);
+    	if (ready > 0) {
+        	for (int i = 0; i < numUsers; i++) {
+            	if (isActive[i] && FD_ISSET(pipes[i][0], &readfds)) {
+                	ssize_t bytesRead = read(pipes[i][0], buffer, MAX_TEXT_SIZE);
+                	if (bytesRead > 0) {
+                    	buffer[bytesRead] = '\0';
+                    	if (sscanf(buffer, "%d %[^\n]", &timestamp, text) == 2) {
+                        	userId = i;
 
-                        // Send to validation
-                        msgsnd(validationQueue, &msg, sizeof(msg) - sizeof(msg.mtype), 0);
-                    } else if (bytesRead == 0) {
-                        // User process has finished
-                        close(pipes[i][0]);
-                        activeUsers--;
-                    }
-                }
-            }
-        }
+                        	Message msg;
+                        	msg.mtype = 30 + groupNum;
+                        	msg.timestamp = timestamp;
+                        	msg.user = userId;
+                        	msg.modifyingGroup = groupNum;
+                        	strncpy(msg.mtext, text, MAX_TEXT_SIZE - 1);
+                        	msg.mtext[MAX_TEXT_SIZE - 1] = '\0';
 
-        // Check for ban messages from moderator
-        Message banMsg;
-        if (msgrcv(moderatorQueue, &banMsg, sizeof(banMsg) - sizeof(banMsg.mtype), 2, IPC_NOWAIT) > 0) {
-            // Handle user ban
-            close(pipes[banMsg.user][0]);
-            activeUsers--;
-        }
-    }
+                        	if (msgsnd(moderatorQueue, &msg, sizeof(Message) - sizeof(long), 0) == -1) {
+                            	perror("msgsnd to moderatorQueue failed");
+                        	}
 
-    // Notify app about group termination
-    Message terminationMsg;
-    terminationMsg.mtype = 1;
-    terminationMsg.modifyingGroup = atoi(strrchr(groupFilePath, '_') + 1);
-    msgsnd(appQueue, &terminationMsg, sizeof(terminationMsg) - sizeof(terminationMsg.mtype), 0);
+                       	printf("Sending to validation: Group=%d, User=%d, Timestamp=%d, Message=%s\n", groupNum, msg.user, msg.timestamp, msg.mtext);
 
-    // Cleanup
-    for (int i = 0; i < numUsers; i++) {
-        close(pipes[i][0]);
-    }
+                         	if (msgsnd(validationQueue, &msg, sizeof(Message) - sizeof(long), 0) == -1) {
+                            	perror("msgsnd to validationQueue failed");
+                            	continue;
+                        	}
+                    	}
+                	}  else if (bytesRead == 0) {
+                    	close(pipes[i][0]);
+                    	isActive[i] = 0;
+                    	activeUsers--;
+                	}
+            	}
+        	}
+    	}
 
-    return 0;
+    	Message banMsg;
+    	if (msgrcv(moderatorQueue, &banMsg, sizeof(Message) - sizeof(long), 2, IPC_NOWAIT) > 0) {
+        	if (isActive[banMsg.user]) {
+            	close(pipes[banMsg.user][0]);
+            	isActive[banMsg.user] = 0;
+            	activeUsers--;
+            	bannedUsers++;
+        	}
+    	}
+	}
+
+	Message termMsg = {
+    	.mtype = 30 + groupNum,
+    	.modifyingGroup = groupNum,
+    	.user = bannedUsers
+	};
+	msgsnd(validationQueue, &termMsg, sizeof(Message) - sizeof(long), 0);
+
+	termMsg.mtype = 1; // Reset mtype for app queue
+	msgsnd(appQueue, &termMsg, sizeof(Message) - sizeof(long), 0);
+
+	for (int i = 0; i < numUsers; i++) {
+    	if (isActive[i]) {
+        	close(pipes[i][0]);
+    	}
+	}
+
+	return 0;
 }
+
+
 
 
 
