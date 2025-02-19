@@ -1,192 +1,106 @@
- #include <stdio.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <sys/msg.h>
+#include <sys/types.h>
+#include <sys/ipc.h>
 #include <string.h>
 #include <ctype.h>
-#include <sys/ipc.h>
-#include <sys/msg.h>
-#include <signal.h>
-#include <unistd.h>
 #include <errno.h>
+#include <unistd.h>
 
-#define MAX_FILTERED_WORDS 50
-#define MAX_TEXT_SIZE 256
-#define MAX_GROUPS 30
-#define MAX_USERS 50
-#define MAX_WORD_LENGTH 20
+#define MAX_WORDS 50
+#define MAX_MESSAGE_LENGTH 256
 
 typedef struct {
-	long mtype;
-	int timestamp;
-	int user;
-	char mtext[MAX_TEXT_SIZE];
-	int modifyingGroup;
-} Message;
+    long mtype;
+    int user;
+    char mtext[MAX_MESSAGE_LENGTH];
+    int violations;
+    int grp_id;
+    int action;
+    int terminator;
+} ModeratorMessage;
 
-int moderatorQueue = -1;
-char filteredWords[MAX_FILTERED_WORDS][MAX_WORD_LENGTH];
-int wordCount = 0;
-int violations[MAX_GROUPS][MAX_USERS] = {0};
-int bannedUsers[MAX_GROUPS] = {0};
-int messagesReceived = 0;
-int groupsDeleted = 0;
+char filtered_words[MAX_WORDS][25];
+int num_filtered_words = 0;
 
-void cleanup() {
-	if (moderatorQueue != -1) {
-    	msgctl(moderatorQueue, IPC_RMID, NULL);
-	}
+void load_filtered_words(char *test_case) {
+    char filename[256];
+    snprintf(filename, sizeof(filename), "testcase_%s/filtered_words.txt", test_case);
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        perror("Error opening filtered_words.txt");
+        exit(EXIT_FAILURE);
+    }
+    while (fscanf(file, "%20s", filtered_words[num_filtered_words]) != EOF && num_filtered_words < MAX_WORDS) {
+        num_filtered_words++;
+    }
+    fclose(file);
 }
 
-void signal_handler(int signum) {
-	cleanup();
-	exit(EXIT_FAILURE);
-}
-
-void loadFilteredWords(const char *filePath) {
-	FILE *file = fopen(filePath, "r");
-	if (!file) {
-    	perror("Failed to open filtered words file");
-    	exit(EXIT_FAILURE);
-	}
-
-	char line[MAX_WORD_LENGTH];
-	while (fgets(line, sizeof(line), file) && wordCount < MAX_FILTERED_WORDS) {
-    	size_t len = strlen(line);
-    	if (len > 0 && line[len-1] == '\n') {
-        	line[len-1] = '\0';
-    	}
-    	if (strlen(line) > 0) {
-        	strncpy(filteredWords[wordCount], line, MAX_WORD_LENGTH - 1);
-        	filteredWords[wordCount][MAX_WORD_LENGTH - 1] = '\0';
-        	wordCount++;
-    	}
-	}
-	fclose(file);
-}
-
-int countViolations(const char *message) {
-	int uniqueViolations = 0;
-	int foundWords[MAX_FILTERED_WORDS] = {0};
-    
-	char lowercaseMessage[MAX_TEXT_SIZE];
-	strncpy(lowercaseMessage, message, MAX_TEXT_SIZE - 1);
-	lowercaseMessage[MAX_TEXT_SIZE - 1] = '\0';
-    
-	for (char *p = lowercaseMessage; *p; p++) {
-    	*p = tolower(*p);
-	}
-
-	for (int i = 0; i < wordCount; i++) {
-    	if (foundWords[i]) continue;
-
-    	char lowercaseFilter[MAX_WORD_LENGTH];
-    	strncpy(lowercaseFilter, filteredWords[i], MAX_WORD_LENGTH - 1);
-    	lowercaseFilter[MAX_WORD_LENGTH - 1] = '\0';
-   	 
-    	for (char *p = lowercaseFilter; *p; p++) {
-        	*p = tolower(*p);
-    	}
-
-    	char *pos = lowercaseMessage;
-    	while ((pos = strstr(pos, lowercaseFilter)) != NULL) {
-        	int isWordStart = (pos == lowercaseMessage || !isalnum(*(pos - 1)));
-        	int isWordEnd = (!*(pos + strlen(lowercaseFilter)) ||
-                       	!isalnum(*(pos + strlen(lowercaseFilter))));
-       	 
-        	if (isWordStart && isWordEnd) {
-            	foundWords[i] = 1;
-            	uniqueViolations++;
-            	break;
-        	}
-        	pos++;
-    	}
-	}
-
-	return uniqueViolations;
+int count_violations(char *message) {
+    int violations = 0;
+    for (int i = 0; i < num_filtered_words; i++) {
+        if (strcasestr(message, filtered_words[i]) != NULL) {
+            violations++;
+        }
+    }
+    return violations;
 }
 
 int main(int argc, char *argv[]) {
-	if (argc != 2) {
-    	fprintf(stderr, "Usage: %s <test_case_number>\n", argv[0]);
-    	exit(EXIT_FAILURE);
-	}
-
-	signal(SIGINT, signal_handler);
-	signal(SIGTERM, signal_handler);
-
-	int testCaseNumber = atoi(argv[1]);
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <test_case_number>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
     
-	char inputFilePath[256];
-	snprintf(inputFilePath, sizeof(inputFilePath), "testcase_%d/input.txt", testCaseNumber);
+    load_filtered_words(argv[1]);
     
-	FILE *inputFile = fopen(inputFilePath, "r");
-	if (!inputFile) {
-    	perror("Failed to open input file");
-    	exit(EXIT_FAILURE);
-	}
-
-	int numGroups, validationKey, appKey, moderatorKey, violationThreshold;
-	if (fscanf(inputFile, "%d %d %d %d %d", &numGroups, &validationKey, &appKey,
-           	&moderatorKey, &violationThreshold) != 5) {
-    	fprintf(stderr, "Failed to read configuration\n");
-    	fclose(inputFile);
-    	exit(EXIT_FAILURE);
-	}
-	fclose(inputFile);
-
-	char filteredWordsPath[256];
-	snprintf(filteredWordsPath, sizeof(filteredWordsPath),
-         	"testcase_%d/filtered_words.txt", testCaseNumber);
-	loadFilteredWords(filteredWordsPath);
-
-	moderatorQueue = msgget(moderatorKey, IPC_CREAT | 0666);
-	if (moderatorQueue == -1) {
-    	perror("Failed to create moderator message queue");
-    	exit(EXIT_FAILURE);
-	}
-
-	Message msg;
-	int activeGroups = numGroups;
-
-	while (activeGroups > 0) {
-    	if (msgrcv(moderatorQueue, &msg, sizeof(msg) - sizeof(msg.mtype), 1, 0) == -1) {
-        	if (errno == EINTR) continue;
-        	if (errno == EIDRM) {
-            	printf("msgrcv failed: Identifier removed\n");
-            	break;
-        	}
-        	perror("Message receive error");
-        	break;
-    	}
-
-    	messagesReceived++;
-   	 
-    	int newViolations = countViolations(msg.mtext);
-    	if (newViolations > 0) {
-        	violations[msg.modifyingGroup][msg.user] += newViolations;
-       	 
-        	if (violations[msg.modifyingGroup][msg.user] >= violationThreshold &&
-            	bannedUsers[msg.modifyingGroup] < MAX_USERS) {
-           	 
-            	Message banMsg = {
-                	.mtype = 2,
-                	.user = msg.user,
-                	.modifyingGroup = msg.modifyingGroup
-            	};
-            	if (msgsnd(moderatorQueue, &banMsg, sizeof(Message) - sizeof(long), 0) == -1) {
-                	if (errno == EIDRM) {
-                    	printf("msgsnd failed: Identifier removed\n");
-                    	break;
-                	}
-            	}
-            	bannedUsers[msg.modifyingGroup]++;
-        	}
-    	}
-	}
-
-	cleanup();
-	return 0;
+    char input_file[256];
+    snprintf(input_file, sizeof(input_file), "testcase_%s/input.txt", argv[1]);
+    FILE *file = fopen(input_file, "r");
+    if (!file) {
+        perror("Error opening input.txt");
+        return EXIT_FAILURE;
+    }
+    int num_groups; 
+    int val_msgq_key;
+    int app_msgq_key;
+    int mod_msgq_key;
+    int violation_threshold;
+    if(fscanf(file, "%d %d %d %d %d", &num_groups, &val_msgq_key, &app_msgq_key, &mod_msgq_key, &violation_threshold) != 5){
+        fprintf(stderr, "Error reading input.txt\n");
+        fclose(file);
+        return EXIT_FAILURE;
+    }
+    fclose(file);
+    
+    printf("Moderator: Using message queue key: %d\n", mod_msgq_key);
+    int msgq_id = msgget(mod_msgq_key, IPC_CREAT | 0666);
+    if (msgq_id == -1) {
+        perror("msgget failed");
+        return EXIT_FAILURE;
+    }
+    
+    printf("Moderator process started. Waiting for messages...\n");
+    ModeratorMessage msg;
+    while (1) {
+        if (msgrcv(msgq_id, &msg, sizeof(ModeratorMessage) - sizeof(long), 1, 0) < 0) {
+            perror("msgrcv failed");
+            sleep(1);
+            continue;
+        }
+        printf("Message received: %s, user: %d, violations: %d, group_id: %d\n",msg.mtext, msg.user, msg.violations, msg.grp_id);
+        int violations = count_violations(msg.mtext);
+        ModeratorMessage reply;
+        reply.mtype = 50 + msg.grp_id;
+        reply.violations = msg.violations;
+        reply.action = (reply.violations >=violation_threshold) ? 1 : 0;
+        msgsnd(msgq_id,&reply, sizeof(ModeratorMessage) - sizeof(long), 0);
+        if (reply.action > 0) {
+            printf("User %d from group %d has been removed due to %d violations.\n",msg.user, msg.grp_id, reply.violations);
+        }
+        
+    }
+    return EXIT_SUCCESS;
 }
-
-
-
-
